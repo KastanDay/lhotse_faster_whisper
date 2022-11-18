@@ -1,5 +1,6 @@
 import logging
 from typing import Any, Generator, List, Optional, Union
+import whisper
 
 import torch
 
@@ -91,6 +92,7 @@ def _annotate_recordings(
                     recordings=recording, supervisions=supervisions, verbose=False
                 )
             )
+        print(list(cut))
         yield cut
 
 
@@ -148,3 +150,40 @@ def _postprocess_timestamps(supervisions: List[SupervisionSegment]):
         out.append(cur)
     out.append(nxt)
     return out
+
+
+class annotator_lhotse:
+    def __init__(self, model_name: str = "base", device: str = "cpu"):
+        self.model = whisper.load_model(model_name, device=device)
+    def yield_annotated_recordings(self, recordings):
+        for recording in recordings:
+            if recording.num_channels > 1:
+                logging.warning(
+                    f"Skipping recording '{recording.id}'. It has {recording.num_channels} channels, "
+                    f"but we currently only support mono input."
+                )
+                continue
+            audio = torch.from_numpy(recording.resample(16000).load_audio()).squeeze(0)
+            result = whisper.transcribe(model=self.model, audio=audio, language=None)
+            supervisions = [
+                SupervisionSegment(
+                    id=f"{recording.id}-{segment['id']:06d}",
+                    recording_id=recording.id,
+                    start=round(segment["start"], ndigits=8),
+                    duration=add_durations(
+                        segment["end"], -segment["start"], sampling_rate=16000
+                    ),
+                    text=segment["text"].strip(),
+                    language=result["language"],
+                )
+                for segment in result["segments"]
+            ]
+            cut = recording.to_cut()
+            if supervisions:
+                supervisions = _postprocess_timestamps(supervisions)
+                cut.supervisions = list(
+                    trim_supervisions_to_recordings(
+                        recordings=recording, supervisions=supervisions, verbose=False
+                    )
+                )
+            yield cut
